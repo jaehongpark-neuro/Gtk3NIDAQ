@@ -1,0 +1,9 @@
+[deps]
+CircularArrayBuffers = "9de3a189-e0c0-4e15-ba3b-b14b9fb0aec1"
+DSP = "717857b8-e6f2-59f4-9121-6e50c889abd2"
+FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
+Gtk = "4c0ca9eb-093a-5379-98c5-f87ac0bbbf44"
+GtkObservables = "8710efd8-4ad6-11eb-33ea-2d5ceb25a41c"
+JLD = "4138dd39-2aa7-5051-a626-17a0bb65d9c8"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+NIDAQ = "66b72792-1abf-55ab-8064-6e9051317175"
