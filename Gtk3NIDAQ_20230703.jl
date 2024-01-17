@@ -1,6 +1,10 @@
 using Pkg
 
+Pkg.activate(pwd())
+
+# using GLMakie
 using Gtk, GtkObservables
+# using DataStructures
 using JLD
 using CircularArrayBuffers
 using NIDAQ
@@ -8,7 +12,31 @@ using FFTW, DSP
 using LinearAlgebra
 using Base.Threads
 
-# Types
+
+
+b =  GtkBuilder(filename="realtimeusv.glade")
+
+win = b["win"]
+grid = b["wholegrid"]
+
+
+airbox = b["airbox"]
+sngbox = b["sngbox"]
+
+recordstartcb = b["recordstart"]
+recordendcb = b["recordend"]
+
+
+sngcnvs = canvas(UserUnit)
+push!(sngbox,sngcnvs )
+
+sngimg = rand(257,3903)
+
+
+@spawn showall(win)
+
+
+
 mutable struct stft_param
     nfft::Int64
     skip::Int64
@@ -31,6 +59,63 @@ mutable struct stft_param
         return sp
     end
 end
+
+# apply hanning window filter to smoothe out the ends
+function sig!(data::Vector{Float64},f::Vector{Float64},ui::UnitRange{Int64},wa::Vector{Float64})
+    # data = whole audio 1 to end
+    # f = filtered data mutated
+    # ui = unit range 1:512 513:1024 ....
+    # wa = hanning window
+    of =1
+    for i = ui
+        @inbounds f[of] = data[i]*wa[of]
+        of+=1
+    end
+    nothing
+end
+
+# convert into real number
+function fout!(fout::Matrix{Float64},tmp::Vector{ComplexF64},offset::Int64)
+    for i = 1:length(tmp)
+        @inbounds fout[offset+i] = abs2(tmp[i])
+    end
+    nothing
+end
+
+function Stft(data::Vector{Float64},
+                        nfft::Int64,skip::Int64,nout::Int64,
+                        window::Vector{Float64},
+                        fin::Vector{Float64},tmp::Vector{ComplexF64},
+                        plan::FFTW.rFFTWPlan{Float64, -1, false, 1, Tuple{Int64}})
+    npts = length(data) # for spectrogram not fixed length inputs
+    nblocks = Int(floor((npts-nfft)/skip))+1
+    # println("$(nblocks)")
+    fout = zeros(Float64,nout,nblocks)
+    offset = 0
+    @inbounds begin for k = 1:nblocks
+            period = (1:nfft) .+ (k-1)*skip
+            sig!(data,fin,period,window)
+            mul!(tmp,plan,fin)
+            fout!(fout,tmp,offset)
+            offset += nout
+        end
+    end
+    return fout
+end
+
+function Stft(data::Vector{Float64},sp::stft_param)
+    Stft(data,sp.nfft,sp.skip,sp.nout,sp.window,sp.fin,sp.tmp,sp.plan)
+end
+
+function nblock(fs,s)
+    sam = Int(floor(fs*s))
+    nblocks = Int(floor((sam-512)/128))+1  
+end
+
+# const NIDAQ_TID = Ref{Int64}(1)
+# if Threads.nthreads() > 1
+#     NIDAQ_TID[] = 2
+# end
 
 mutable struct Recording
     task::DAQTask{AI}
@@ -88,74 +173,6 @@ mutable struct Recording
     end
 end
 
-
-# GTK Objects
-b =  GtkBuilder(filename="realtimeusv.glade")
-win = b["win"]
-grid = b["wholegrid"]
-airbox = b["airbox"]
-sngbox = b["sngbox"]
-recordstartcb = b["recordstart"]
-recordendcb = b["recordend"]
-sngcnvs = canvas(UserUnit)
-push!(sngbox,sngcnvs )
-sngimg = rand(257,3903)
-
-# Spawn GUI on an interactive thread
-@spawn :interactive showall(win)
-
-# apply hanning window filter to smoothe out the ends
-function sig!(data::Vector{Float64},f::Vector{Float64},ui::UnitRange{Int64},wa::Vector{Float64})
-    # data = whole audio 1 to end
-    # f = filtered data mutated
-    # ui = unit range 1:512 513:1024 ....
-    # wa = hanning window
-    of =1
-    for i = ui
-        @inbounds f[of] = data[i]*wa[of]
-        of+=1
-    end
-    nothing
-end
-
-# convert into real number
-function fout!(fout::Matrix{Float64},tmp::Vector{ComplexF64},offset::Int64)
-    for i = 1:length(tmp)
-        @inbounds fout[offset+i] = abs2(tmp[i])
-    end
-    nothing
-end
-
-function Stft(data::Vector{Float64},
-              nfft::Int64,skip::Int64,nout::Int64,
-              window::Vector{Float64},
-              fin::Vector{Float64},tmp::Vector{ComplexF64},
-              plan::FFTW.rFFTWPlan{Float64, -1, false, 1, Tuple{Int64}})
-
-    npts = length(data) # for spectrogram not fixed length inputs
-    nblocks = Int(floor((npts-nfft)/skip))+1
-    fout = zeros(Float64,nout,nblocks)
-    offset = 0
-    @inbounds begin for k = 1:nblocks
-            period = (1:nfft) .+ (k-1)*skip
-            sig!(data,fin,period,window)
-            mul!(tmp,plan,fin)
-            fout!(fout,tmp,offset)
-            offset += nout
-        end
-    end
-    return fout
-end
-
-function Stft(data::Vector{Float64},sp::stft_param)
-    Stft(data,sp.nfft,sp.skip,sp.nout,sp.window,sp.fin,sp.tmp,sp.plan)
-end
-
-function nblock(fs,s)
-    sam = Int(floor(fs*s))
-    nblocks = Int(floor((sam-512)/128))+1  
-end
-
 function update_disbuffer!(wholesng::CircularArrayBuffer{Float64},sng::Matrix{Float64})
     highcut =0.01
     for i in 1:size(sng,2)
@@ -191,16 +208,22 @@ function signal_updates(rec::Recording,sp::stft_param,
     @async begin
         for x in rec.chan
             wholedata = vec(x)
+            
             air = wholedata[rec.airind]
             audio = wholedata[rec.audioind]
+
+            
             append!(rec.air, air)
             append!(rec.audio,audio)
+            # println("length of whole channle is : $(length(audio))")
+            
             currentdata = leftover + length(audio)
+            
             ff = Stft(rec.audio[end-currentdata:end],stft_param())
             used = size(ff,2)*sp.skip
             leftover = currentdata - used
-            # Printing to the REPL will slow things down, only use while debugging.
-            # println("size of blocks is : $(size(ff,2))")
+            println("size of blocks is : $(size(ff,2))")
+
             update_disbuffer!(rec.sng,ff)
             update_display!(discnvs,rec.sng,sngimage)
 
@@ -225,17 +248,22 @@ end
 
 id = signal_connect(recordend,recordendcb,"clicked")
 
-# Initialize a recording
+# initialize
+
 hs = 2
 fs = 250_000
 sngimg = rand(257,nblock(fs,hs))
 REC = Recording(sngcnvs,sngimg;fs=fs,refresh=20,history_seconds=hs)
-wait(REC()) # actual recording start
 
-NIDAQ.stop(REC.task) # stop
+# actual recording start
+wait(REC())
+
+# stop
+NIDAQ.stop(REC.task)
 
 REC.chan
 put!(REC.chan,ones(25000))
+
 
 @async for i in 1:1000
     put!(REC.chan,clamp.(rand(25000),0.0,0.1)./0.1)
